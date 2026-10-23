@@ -115,13 +115,13 @@ class TimelineSimulator:
     - Preserves exact SRT start and end times.
     - Letter Loop:
       - Case-insensitive, stripping punctuation except apostrophes.
-      - For each letter occurrence in current word W_curr, search backwards through earlier subtitle entries (W_prev < W_curr)
-        for the most recent word containing that letter.
-      - Targets the base clip [S_prev, E_prev] of W_prev. Letter loops do NOT trigger nested letter loops.
+      - For each letter occurrence in current word W_curr (start T_curr), search backwards through earlier subtitle entries (W_prev < W_curr)
+        for the most recent word containing that letter (start T_prev).
+      - Plays continuously from T_prev up to T_curr ([T_prev, T_curr]). Letter loops do NOT trigger nested letter loops.
     - Whole-Word Loop:
       - Occurs if exact clean word appeared earlier in the subtitle sequence (most recent occurrence W_prev at entry k).
-      - Replays the normal timeline sequence from entry k up to W_curr (exclusive).
-      - Plays letter loops and base clips for entry k and subsequent entries up to W_curr.
+      - Replays the normal timeline sequence from entry k through W_curr (inclusive).
+      - Plays letter loops and base clips for entry k through W_curr.
       - Replaying through this timeline sequence sets is_replay=True, suppressing nested whole-word loops to prevent infinite recursion.
     - Gaps/intro/ending:
       - Preserved once in original timeline order.
@@ -188,7 +188,7 @@ class TimelineSimulator:
             w_chars = get_word_letters(w)
 
             # 1. Letter loops for current word
-            # Each letter occurrence targets the base clip of the most recent earlier word containing that letter
+            # For each letter, jump to S_prev of most recent earlier word containing that letter and play continuously to T_curr
             for ch in w_chars:
                 prev_occurrences = [
                     hist_word for hist_word in letter_word_history.get(ch, [])
@@ -196,41 +196,45 @@ class TimelineSimulator:
                 ]
                 if prev_occurrences:
                     most_recent_word = prev_occurrences[-1]
-                    dur = most_recent_word["end"] - most_recent_word["start"]
-                    rep_label = " [replay]" if is_replay else ""
-                    segments.append({
-                        "type": "letter_loop",
-                        "start": most_recent_word["start"],
-                        "end": most_recent_word["end"],
-                        "label": f"Letter loop '{ch}' -> '{most_recent_word['tok']}' ({w['tok']}){rep_label}",
-                        "is_replay": is_replay
-                    })
-                    event_log.append({
-                        "source_word": w["tok"],
-                        "source_entry": entry_idx,
-                        "event_type": "letter_loop",
-                        "match": f"Letter '{ch}' -> word '{most_recent_word['tok']}'",
-                        "target_entry": most_recent_word.get("entry_idx", 0),
-                        "target_word": most_recent_word["tok"],
-                        "target_start": most_recent_word["start"],
-                        "target_end": most_recent_word["end"],
-                        "output_start": out_cursor,
-                        "output_end": out_cursor + dur,
-                        "is_replay": is_replay
-                    })
-                    out_cursor += dur
-                    letter_loop_count += 1
+                    s_prev = most_recent_word["start"]
+                    dur = w_start - s_prev
+                    if dur > 0:
+                        rep_label = " [replay]" if is_replay else ""
+                        segments.append({
+                            "type": "letter_loop",
+                            "start": s_prev,
+                            "end": w_start,
+                            "label": f"Letter loop '{ch}' -> '{most_recent_word['tok']}' ({w['tok']}){rep_label}",
+                            "is_replay": is_replay
+                        })
+                        event_log.append({
+                            "source_word": w["tok"],
+                            "source_entry": entry_idx,
+                            "event_type": "letter_loop",
+                            "match": f"Letter '{ch}' -> word '{most_recent_word['tok']}'",
+                            "target_entry": most_recent_word.get("entry_idx", 0),
+                            "target_word": most_recent_word["tok"],
+                            "target_start": s_prev,
+                            "target_end": w_start,
+                            "output_start": out_cursor,
+                            "output_end": out_cursor + dur,
+                            "is_replay": is_replay
+                        })
+                        out_cursor += dur
+                        letter_loop_count += 1
 
             # 2. Whole-Word Loop (only executed if not already in replay context)
+            has_word_loop = False
             if not is_replay and w_clean and w_clean in word_history and word_history[w_clean]:
+                has_word_loop = True
                 prev_w_entry = word_history[w_clean][-1]
                 target_idx = prev_w_entry.get("entry_idx", 0)
                 curr_idx = entry_idx
 
-                # Find list of entries from prev_w_entry up to w (exclusive)
+                # Find list of entries from prev_w_entry through w (inclusive)
                 replay_entries = [
                     word_item for word_item in self.words
-                    if target_idx <= word_item.get("entry_idx", 0) < curr_idx
+                    if target_idx <= word_item.get("entry_idx", 0) <= curr_idx
                 ]
 
                 word_loop_count += 1
@@ -238,30 +242,31 @@ class TimelineSimulator:
                 for r_entry in replay_entries:
                     process_word_entry(r_entry, is_replay=True)
 
-            # 3. Base Word Clip
-            word_dur = w_end - w_start
-            rep_label = " [replay]" if is_replay else ""
-            segments.append({
-                "type": "word_base",
-                "start": w_start,
-                "end": w_end,
-                "label": f"{w['tok']}{rep_label}",
-                "is_replay": is_replay
-            })
-            event_log.append({
-                "source_word": w["tok"],
-                "source_entry": entry_idx,
-                "event_type": "word_base",
-                "match": None,
-                "target_entry": entry_idx,
-                "target_word": w["tok"],
-                "target_start": w_start,
-                "target_end": w_end,
-                "output_start": out_cursor,
-                "output_end": out_cursor + word_dur,
-                "is_replay": is_replay
-            })
-            out_cursor += word_dur
+            # 3. Base Word Clip (only played if not already played in a whole-word loop replay for current word)
+            if not has_word_loop:
+                word_dur = w_end - w_start
+                rep_label = " [replay]" if is_replay else ""
+                segments.append({
+                    "type": "word_base",
+                    "start": w_start,
+                    "end": w_end,
+                    "label": f"{w['tok']}{rep_label}",
+                    "is_replay": is_replay
+                })
+                event_log.append({
+                    "source_word": w["tok"],
+                    "source_entry": entry_idx,
+                    "event_type": "word_base",
+                    "match": None,
+                    "target_entry": entry_idx,
+                    "target_word": w["tok"],
+                    "target_start": w_start,
+                    "target_end": w_end,
+                    "output_start": out_cursor,
+                    "output_end": out_cursor + word_dur,
+                    "is_replay": is_replay
+                })
+                out_cursor += word_dur
 
             # Record in history after processing current word (if primary timeline pass)
             if not is_replay:
