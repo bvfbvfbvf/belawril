@@ -1,7 +1,7 @@
 """
 Belawril Timeline Simulator and Subtitle Parser.
 Handles SRT parsing, word splitting, letter-loop and whole-word loop event calculations,
-and timeline duration/event counting.
+and timeline duration/event counting with structured event logging.
 """
 
 import re
@@ -60,6 +60,7 @@ def split_words(cues):
     If a cue contains multiple words, slice it proportionally by character length.
     """
     out = []
+    entry_counter = 1
     for c in cues:
         toks = c["text"].split()
         if not toks or c["end"] <= c["start"]:
@@ -69,7 +70,16 @@ def split_words(cues):
         dur = c["end"] - c["start"]
         for i, (t, w) in enumerate(zip(toks, weights)):
             end = c["end"] if i == len(toks) - 1 else cursor + dur * w / total
-            out.append({"tok": t, "start": cursor, "end": end, "cue": c["num"], "idx": i + 1, "words": len(toks)})
+            out.append({
+                "entry_idx": entry_counter,
+                "tok": t,
+                "start": cursor,
+                "end": end,
+                "cue": c["num"],
+                "idx": i + 1,
+                "words": len(toks)
+            })
+            entry_counter += 1
             cursor = end
     return out
 
@@ -90,59 +100,29 @@ def clean_letter(c):
     return ""
 
 
-def get_letter_time_slices(word_entry):
-    """
-    Given a word entry with start, end and tok,
-    divide [start, end] among all valid letters (letters/digits/apostrophes).
-    Returns list of dicts: [{'char': c_clean, 'start': s, 'end': e, 'word_idx': idx}, ...]
-    """
+def get_word_letters(word_entry):
+    """Returns list of clean characters for the word entry."""
     tok = word_entry["tok"]
-    start = word_entry["start"]
-    end = word_entry["end"]
-    dur = end - start
-
-    # Filter out valid characters for matching
-    valid_chars = [c for c in tok if clean_letter(c)]
-    if not valid_chars or dur <= 0:
-        return []
-
-    slice_dur = dur / len(valid_chars)
-    slices = []
-    for i, c in enumerate(valid_chars):
-        c_clean = clean_letter(c)
-        s = start + i * slice_dur
-        e = start + (i + 1) * slice_dur if i < len(valid_chars) - 1 else end
-        slices.append({
-            "char": c_clean,
-            "start": s,
-            "end": e,
-            "word_tok": tok,
-            "word_clean": clean_word_for_matching(tok),
-            "word_start": start,
-            "word_end": end,
-        })
-    return slices
+    return [clean_letter(c) for c in tok if clean_letter(c)]
 
 
 class TimelineSimulator:
     """
     Simulates Belawril loop rules and generates timeline segment clips.
 
-    Rules:
-    - Input: Video and SRT file (or parsed word list).
-    - Exact SRT start/end times preserved.
-    - Letter loop:
-      - Case insensitive matching.
-      - Strips all punctuation EXCEPT apostrophes.
-      - For each letter occurrence in a word, find its most recent previous occurrence in the preceding subtitle sequence.
-      - Duplicate letters in same word (e.g., second 'o' in "look") trigger repeat to the same previous occurrence that the first 'o' went to.
-      - Letter loops occur immediately before the word itself.
-    - Whole-word loop:
-      - Occurs if exact word appeared previously in the subtitle sequence (most recent previous occurrence).
-      - Occurs immediately before the word itself, after the word's letter loops.
-      - Replaying W_prev includes W_prev's letter loops followed by W_prev's base clip.
-      - Whole-word loops MUST NOT recursively trigger additional whole-word loops within replays.
-      - Letter loops remain active inside whole-word replays.
+    Belawril Rules:
+    - Input: Video and SRT subtitle entries (one word per entry).
+    - Preserves exact SRT start and end times.
+    - Letter Loop:
+      - Case-insensitive, stripping punctuation except apostrophes.
+      - For each letter occurrence in current word W_curr, search backwards through earlier subtitle entries (W_prev < W_curr)
+        for the most recent word containing that letter.
+      - Targets the base clip [S_prev, E_prev] of W_prev. Letter loops do NOT trigger nested letter loops.
+    - Whole-Word Loop:
+      - Occurs if exact clean word appeared earlier in the subtitle sequence (most recent occurrence W_prev at entry k).
+      - Replays the normal timeline sequence from entry k up to W_curr (exclusive).
+      - Plays letter loops and base clips for entry k and subsequent entries up to W_curr.
+      - Replaying through this timeline sequence sets is_replay=True, suppressing nested whole-word loops to prevent infinite recursion.
     - Gaps/intro/ending:
       - Preserved once in original timeline order.
     """
@@ -153,149 +133,207 @@ class TimelineSimulator:
 
     def generate_timeline(self):
         """
-        Builds timeline segments.
-        Each segment is a dict:
-          {'type': 'gap'|'word_base'|'letter_loop'|'word_loop',
-           'start': float, 'end': float, 'label': str}
-
-        Also computes total stats:
+        Builds timeline segments and detailed event log.
+        Returns dict with:
+          'segments': list of segment dicts
+          'event_log': list of event log dicts
           'letter_loop_count': int
           'word_loop_count': int
           'total_duration': float
         """
         segments = []
-        letter_history = {}  # char -> list of letter_slice dicts
-        word_history = {}    # clean_word -> list of dicts with word_entry & letter_slices
+        event_log = []
 
-        def build_word_replay_segments(target_word_entry, target_letter_slices):
-            """
-            Replays target_word_entry.
-            Per Belawril rules: Replaying W_prev includes W_prev's letter loops followed by W_prev's base clip,
-            but suppresses any nested whole-word loops (no recursion).
-            """
-            replay_segs = []
-            # 1. Target word's letter loops (using history at the time target_word occurred)
-            for l_slice in target_letter_slices:
-                ch = l_slice["char"]
-                # Previous occurrences before target_word_entry
-                prev_occurrences = [
-                    hist_slice for hist_slice in letter_history.get(ch, [])
-                    if hist_slice["word_start"] < target_word_entry["start"]
-                ]
-                if prev_occurrences:
-                    most_recent = prev_occurrences[-1]
-                    replay_segs.append({
-                        "type": "letter_loop",
-                        "start": most_recent["start"],
-                        "end": most_recent["end"],
-                        "label": f"Letter loop '{ch}' ({target_word_entry['tok']})"
-                    })
-            # 2. Target word's base clip
-            replay_segs.append({
-                "type": "word_base",
-                "start": target_word_entry["start"],
-                "end": target_word_entry["end"],
-                "label": target_word_entry["tok"]
-            })
-            return replay_segs
+        letter_word_history = {}  # char -> list of word dicts containing char
+        word_history = {}         # clean_word -> list of word dicts
 
+        out_cursor = 0.0
         pos = 0.0
         letter_loop_count = 0
         word_loop_count = 0
 
-        for w in self.words:
+        # Helper function to generate events for a word entry
+        def process_word_entry(w, is_replay=False):
+            nonlocal out_cursor, pos, letter_loop_count, word_loop_count
             w_clean = clean_word_for_matching(w["tok"])
             w_start = w["start"]
             w_end = w["end"]
+            entry_idx = w.get("entry_idx", 0)
 
-            # Preserve gap before word
-            if w_start > pos:
+            # Preserve gap before word (only in primary timeline pass)
+            if not is_replay and w_start > pos:
+                gap_dur = w_start - pos
                 segments.append({
                     "type": "gap",
                     "start": pos,
                     "end": w_start,
-                    "label": "gap"
+                    "label": "gap",
+                    "is_replay": False
                 })
+                event_log.append({
+                    "source_word": "gap",
+                    "source_entry": 0,
+                    "event_type": "gap",
+                    "match": None,
+                    "target_entry": 0,
+                    "target_word": None,
+                    "target_start": pos,
+                    "target_end": w_start,
+                    "output_start": out_cursor,
+                    "output_end": out_cursor + gap_dur,
+                    "is_replay": False
+                })
+                out_cursor += gap_dur
 
-            w_slices = get_letter_time_slices(w)
+            w_chars = get_word_letters(w)
 
             # 1. Letter loops for current word
-            word_letter_loop_segs = []
-            for l_slice in w_slices:
-                ch = l_slice["char"]
-                # Find most recent previous occurrence in preceding subtitle sequence (before w_start)
+            # Each letter occurrence targets the base clip of the most recent earlier word containing that letter
+            for ch in w_chars:
                 prev_occurrences = [
-                    hist_slice for hist_slice in letter_history.get(ch, [])
-                    if hist_slice["word_start"] < w_start
+                    hist_word for hist_word in letter_word_history.get(ch, [])
+                    if hist_word["start"] < w_start
                 ]
                 if prev_occurrences:
-                    most_recent = prev_occurrences[-1]
-                    word_letter_loop_segs.append({
+                    most_recent_word = prev_occurrences[-1]
+                    dur = most_recent_word["end"] - most_recent_word["start"]
+                    rep_label = " [replay]" if is_replay else ""
+                    segments.append({
                         "type": "letter_loop",
-                        "start": most_recent["start"],
-                        "end": most_recent["end"],
-                        "label": f"Letter loop '{ch}' ({w['tok']})"
+                        "start": most_recent_word["start"],
+                        "end": most_recent_word["end"],
+                        "label": f"Letter loop '{ch}' -> '{most_recent_word['tok']}' ({w['tok']}){rep_label}",
+                        "is_replay": is_replay
                     })
+                    event_log.append({
+                        "source_word": w["tok"],
+                        "source_entry": entry_idx,
+                        "event_type": "letter_loop",
+                        "match": f"Letter '{ch}' -> word '{most_recent_word['tok']}'",
+                        "target_entry": most_recent_word.get("entry_idx", 0),
+                        "target_word": most_recent_word["tok"],
+                        "target_start": most_recent_word["start"],
+                        "target_end": most_recent_word["end"],
+                        "output_start": out_cursor,
+                        "output_end": out_cursor + dur,
+                        "is_replay": is_replay
+                    })
+                    out_cursor += dur
                     letter_loop_count += 1
 
-            # Append letter loops immediately before the word
-            segments.extend(word_letter_loop_segs)
+            # 2. Whole-Word Loop (only executed if not already in replay context)
+            if not is_replay and w_clean and w_clean in word_history and word_history[w_clean]:
+                prev_w_entry = word_history[w_clean][-1]
+                target_idx = prev_w_entry.get("entry_idx", 0)
+                curr_idx = entry_idx
 
-            # 2. Whole-word loop for current word
-            if w_clean and w_clean in word_history and word_history[w_clean]:
-                prev_w_info = word_history[w_clean][-1]
-                prev_w_entry = prev_w_info["word_entry"]
-                prev_w_slices = prev_w_info["letter_slices"]
+                # Find list of entries from prev_w_entry up to w (exclusive)
+                replay_entries = [
+                    word_item for word_item in self.words
+                    if target_idx <= word_item.get("entry_idx", 0) < curr_idx
+                ]
 
-                # Replay W_prev (letter loops + base clip, no nested whole-word loop)
-                replay_segs = build_word_replay_segments(prev_w_entry, prev_w_slices)
-                # Count letter loops triggered inside whole-word replay
-                for r_seg in replay_segs:
-                    if r_seg["type"] == "letter_loop":
-                        letter_loop_count += 1
-
-                segments.extend(replay_segs)
                 word_loop_count += 1
+                # Play through replay sequence with is_replay=True (suppressing nested word loops)
+                for r_entry in replay_entries:
+                    process_word_entry(r_entry, is_replay=True)
 
-            # 3. Base word clip
+            # 3. Base Word Clip
+            word_dur = w_end - w_start
+            rep_label = " [replay]" if is_replay else ""
             segments.append({
                 "type": "word_base",
                 "start": w_start,
                 "end": w_end,
-                "label": w["tok"]
+                "label": f"{w['tok']}{rep_label}",
+                "is_replay": is_replay
             })
+            event_log.append({
+                "source_word": w["tok"],
+                "source_entry": entry_idx,
+                "event_type": "word_base",
+                "match": None,
+                "target_entry": entry_idx,
+                "target_word": w["tok"],
+                "target_start": w_start,
+                "target_end": w_end,
+                "output_start": out_cursor,
+                "output_end": out_cursor + word_dur,
+                "is_replay": is_replay
+            })
+            out_cursor += word_dur
 
-            # Record in history after processing
-            for l_slice in w_slices:
-                ch = l_slice["char"]
-                if ch not in letter_history:
-                    letter_history[ch] = []
-                letter_history[ch].append(l_slice)
+            # Record in history after processing current word (if primary timeline pass)
+            if not is_replay:
+                unique_chars_in_w = set(w_chars)
+                for ch in unique_chars_in_w:
+                    if ch not in letter_word_history:
+                        letter_word_history[ch] = []
+                    letter_word_history[ch].append(w)
 
-            if w_clean:
-                if w_clean not in word_history:
-                    word_history[w_clean] = []
-                word_history[w_clean].append({
-                    "word_entry": w,
-                    "letter_slices": w_slices
-                })
+                if w_clean:
+                    if w_clean not in word_history:
+                        word_history[w_clean] = []
+                    word_history[w_clean].append(w)
 
-            pos = w_end
+                pos = w_end
+
+        for w in self.words:
+            process_word_entry(w, is_replay=False)
 
         # Preserve remaining gap/ending
         if self.video_duration > pos:
+            gap_dur = self.video_duration - pos
             segments.append({
                 "type": "gap",
                 "start": pos,
                 "end": self.video_duration,
-                "label": "gap"
+                "label": "gap",
+                "is_replay": False
             })
+            event_log.append({
+                "source_word": "gap",
+                "source_entry": 0,
+                "event_type": "gap",
+                "match": None,
+                "target_entry": 0,
+                "target_word": None,
+                "target_start": pos,
+                "target_end": self.video_duration,
+                "output_start": out_cursor,
+                "output_end": out_cursor + gap_dur,
+                "is_replay": False
+            })
+            out_cursor += gap_dur
 
         total_dur = sum(s["end"] - s["start"] for s in segments)
 
         return {
             "segments": segments,
+            "event_log": event_log,
             "letter_loop_count": letter_loop_count,
             "word_loop_count": word_loop_count,
             "total_duration": total_dur,
         }
+
+    def format_event_log_text(self, sim_res=None):
+        """Returns readable formatted text string of the event log."""
+        if sim_res is None:
+            sim_res = self.generate_timeline()
+
+        lines = [
+            f"BELAWRIL EVENT LOG (Total Duration: {sim_res['total_duration']:.3f}s | "
+            f"Letter Loops: {sim_res['letter_loop_count']} | Whole-Word Loops: {sim_res['word_loop_count']})",
+            "=" * 90,
+            f"{'Out Time Range':<20} | {'Type':<18} | {'Source Word':<12} | {'Match / Target':<25} | {'Source Cut Range'}",
+            "-" * 90
+        ]
+        for e in sim_res["event_log"]:
+            out_time = f"{e['output_start']:.2f}s - {e['output_end']:.2f}s"
+            cut_time = f"{e['target_start']:.2f}s - {e['target_end']:.2f}s"
+            match_info = e['match'] or f"Entry {e['target_entry']} '{e['target_word'] or ''}'"
+            rep_flag = " (replay)" if e['is_replay'] else ""
+            lines.append(
+                f"{out_time:<20} | {e['event_type'] + rep_flag:<18} | {e['source_word']:<12} | {match_info:<25} | {cut_time}"
+            )
+        return "\n".join(lines)
