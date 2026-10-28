@@ -144,9 +144,8 @@ class BetalirilbidsApp(tk.Tk):
 
         ttk.Label(f2, justify="left", foreground="#555555", text=(
             "Betalirilbids Loop Logic:\n"
-            "• Each word's base clip plays first.\n"
             "• Every letter occurrence triggers a loop to its most recent previous occurrence.\n"
-            "• Letter loops replay continuously through the timeline [S_prev, S_curr].\n"
+            "• Replayed words trigger 2nd-layer letter loops [S_prev, S_curr].\n"
             "• Input and intermediate render files are strictly retained."
         )).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8))
 
@@ -301,7 +300,7 @@ class BetalirilbidsApp(tk.Tk):
                     progress_callback=progress_cb,
                     keep_temp=True
                 )
-                self.q.put(("done", None))
+                self.q.put(("done", "SUCCESS"))
             except Exception as e:
                 self.q.put(("done", str(e)))
 
@@ -309,12 +308,14 @@ class BetalirilbidsApp(tk.Tk):
         self.after(100, self.poll)
 
     def poll(self):
-        finished = None
+        finished = False
+        err_msg = None
         try:
             while True:
                 kind, data = self.q.get_nowait()
                 if kind == "done":
-                    finished = data
+                    finished = True
+                    err_msg = data if data != "SUCCESS" else None
                     break
                 elif kind == "progress":
                     pct, msg = data
@@ -324,8 +325,8 @@ class BetalirilbidsApp(tk.Tk):
         except queue.Empty:
             pass
 
-        if finished is not None or (finished is None and not self.running):
-            self.finish(finished)
+        if finished:
+            self.finish(err_msg)
         else:
             self.after(150, self.poll)
 
