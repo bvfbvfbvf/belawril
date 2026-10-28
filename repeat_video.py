@@ -1021,8 +1021,17 @@ def _encode_sound_units(a, units, fr, total_frames, fps_f, tmp):
     t0 = time.time()
     lock = threading.Lock()
 
+    cache = {}
+
     def enc(i):
         u = units[i]
+        key = (u["sf"], u["ef"])
+        with lock:
+            if key in cache:
+                done[0] += 1
+                show_progress("Preparing sound %d/%d" % (done[0], len(units)), done[0] / float(len(units)), t0)
+                return cache[key]
+
         s0 = rnd(Fraction(u["sf"]) * rate / fr)
         L = rnd(Fraction(u["ef"] - u["sf"]) * rate / fr)
         S = -(-L // 1024) * 1024
@@ -1034,10 +1043,13 @@ def _encode_sound_units(a, units, fr, total_frames, fps_f, tmp):
         _run_stdin(["ffmpeg", "-y", "-v", "error", "-f", "s16le", "-ar", str(rate), "-ac", "2", "-i", "-",
                     "-c:a", "aac", "-b:a", a.audio_bitrate, "-f", "mp4", "-movflags", "0", out], data)
         M = _parse_simple_mov(out, strict_timing=False)
+        res_dict = {"path": out, "sizes": M["sizes"], "data_off": M["data_off"], "data_len": M["data_len"], "meta": M}
+
         with lock:
+            cache[key] = res_dict
             done[0] += 1
             show_progress("Preparing sound %d/%d" % (done[0], len(units)), done[0] / float(len(units)), t0)
-        return {"path": out, "sizes": M["sizes"], "data_off": M["data_off"], "data_len": M["data_len"], "meta": M}
+        return res_dict
 
     with ThreadPoolExecutor(max_workers=max(1, min(4, os.cpu_count() or 2))) as ex:
         res = list(ex.map(enc, range(len(units))))
