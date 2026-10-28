@@ -18,62 +18,70 @@ the
     assert res["segments"][0]["type"] == "word_base"
 
 
-def test_2_basic_letter_matching():
-    # CAB (0-1s) -> DOG (1-2s) -> BAT (2-3s) -> FISH (3-4s)
+def test_2_letter_loops_play_before_base_clip():
+    # Entry 1 "the" (0-1s), Entry 2 "cat" (1-2s)
+    # Entry 2 "cat" letter loop 't' plays FIRST: targets "the" [0-1s]
+    # THEN base clip "cat" [1-2s] plays, advancing playback to Entry 3
     cues_text = """1
 00:00:00,000 --> 00:00:01,000
-CAB
+the
 
 2
 00:00:01,000 --> 00:00:02,000
-DOG
-
-3
-00:00:02,000 --> 00:00:03,000
-BAT
-
-4
-00:00:03,000 --> 00:00:04,000
-FISH
+cat
 """
     cues = simulator.parse_srt(cues_text, is_filepath=False)
     words = simulator.split_words(cues)
-    sim = simulator.TimelineSimulator(words, video_duration=4.0)
+    sim = simulator.TimelineSimulator(words, video_duration=2.0)
     res = sim.generate_timeline()
 
-    assert res["letter_loop_count"] == 2
-    bat_loops = [e for e in res["event_log"] if e["source_word"] == "BAT" and e["event_type"] == "letter_loop"]
-    assert len(bat_loops) == 2
-    assert bat_loops[0]["target_word"] == "CAB"
-    assert bat_loops[1]["target_word"] == "CAB"
+    segs = res["segments"]
+    assert len(segs) == 3
+    # 1. Base clip "the" [0-1s]
+    assert segs[0]["type"] == "word_base" and segs[0]["label"] == "the"
+    # 2. Letter loop 't' triggers BEFORE "cat" base clip: targets [0-1s]
+    assert segs[1]["type"] == "letter_loop" and segs[1]["start"] == 0.0 and segs[1]["end"] == 1.0
+    # 3. Base clip "cat" [1-2s] plays AFTER letter loop 't'
+    assert segs[2]["type"] == "word_base" and segs[2]["label"] == "cat"
 
 
-def test_3_repeated_letters():
-    # THE (0-1s) -> CAT (1-2s) -> AREA (2-3s)
+def test_3_three_words_ordering():
+    # 1 "the" (0-1s), 2 "cat" (1-2s), 3 "sat" (2-3s)
+    # Entry 1: base "the" (0-1s)
+    # Entry 2: letter loop 't' [0-1s] -> base "cat" (1-2s)
+    # Entry 3: letter loop 'a' [1-2s] -> letter loop 't' [1-2s] -> base "sat" (2-3s)
     cues_text = """1
 00:00:00,000 --> 00:00:01,000
-THE
+the
 
 2
 00:00:01,000 --> 00:00:02,000
-CAT
+cat
 
 3
 00:00:02,000 --> 00:00:03,000
-AREA
+sat
 """
     cues = simulator.parse_srt(cues_text, is_filepath=False)
     words = simulator.split_words(cues)
     sim = simulator.TimelineSimulator(words, video_duration=3.0)
     res = sim.generate_timeline()
 
-    # CAT 'T' triggers outer loop.
-    # AREA 1st 'A', 'E', 2nd 'A' trigger outer loops + replayed CAT triggers inner 'T' loops -> 7 total
-    assert res["letter_loop_count"] == 7
+    segs = res["segments"]
+    labels = [s["label"] for s in segs]
+    expected_labels = [
+        "the",
+        "Letter loop 't' -> 'the' (cat)",
+        "cat",
+        "Letter loop 'a' -> 'cat' (sat)",
+        "Letter loop 't' -> 'cat' (sat)",
+        "sat",
+    ]
+    assert labels == expected_labels
+    assert res["letter_loop_count"] == 3
 
 
-def test_4_layered_loops():
-    # AB (0-1s) -> BA (1-2s) -> CD (2-3s)
+def test_4_event_log_formatting():
     cues_text = """1
 00:00:00,000 --> 00:00:01,000
 AB
@@ -81,19 +89,11 @@ AB
 2
 00:00:01,000 --> 00:00:02,000
 BA
-
-3
-00:00:02,000 --> 00:00:03,000
-CD
 """
     cues = simulator.parse_srt(cues_text, is_filepath=False)
     words = simulator.split_words(cues)
-    sim = simulator.TimelineSimulator(words, video_duration=3.0)
+    sim = simulator.TimelineSimulator(words, video_duration=2.0)
     res = sim.generate_timeline()
 
-    # BA triggers B (replays AB) and A (replays AB)
-    assert res["letter_loop_count"] == 2
-
-    # Check formatted log text output
     log_text = sim.format_event_log_text(res)
     assert "BETALIRILBIDS EVENT LOG" in log_text

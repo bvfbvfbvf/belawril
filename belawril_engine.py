@@ -1,7 +1,7 @@
 """
-Belawril Fast Rendering Engine.
+Betalirilbids Fast Rendering Engine.
 High-performance video renderer utilizing fast Annex-B H.264 stream copying, MP4 sample table referencing,
-and single-pass filter graph rendering for maximum speed.
+and single-pass filter graph rendering with GUI progress callback support.
 """
 
 import os
@@ -31,7 +31,7 @@ def setup_ffmpeg_path():
 setup_ffmpeg_path()
 
 
-def render_single_pass_concat(video_path, timeline_segs, output_path, fps, has_audio, crf, preset, audio_bitrate):
+def render_single_pass_concat(video_path, timeline_segs, output_path, fps, has_audio, crf, preset, audio_bitrate, progress_cb=None):
     """
     Renders timeline segments in a single pass using ffmpeg filter complex.
     Avoids spawning individual ffmpeg processes per clip, executing in seconds instead of minutes.
@@ -39,8 +39,9 @@ def render_single_pass_concat(video_path, timeline_segs, output_path, fps, has_a
     if not timeline_segs:
         raise ValueError("No timeline segments to render.")
 
-    # Filter complex trim construction
-    # Group into batches if filter graph exceeds command line limits
+    if progress_cb:
+        progress_cb(10.0, "Preparing single-pass video concatenation...")
+
     batch_size = 300
     if len(timeline_segs) <= batch_size:
         v_parts = []
@@ -71,13 +72,23 @@ def render_single_pass_concat(video_path, timeline_segs, output_path, fps, has_a
 
         cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p", "-r", "%.5f" % fps,
                 "-movflags", "+faststart", output_path]
+
+        if progress_cb:
+            progress_cb(50.0, "Encoding video and audio in single pass...")
         ref_engine.run(cmd)
+        if progress_cb:
+            progress_cb(95.0, "Finalizing output video...")
     else:
-        # For extremely large timeline segment lists (>300 segments), slice into chunk files in batches
-        tmp = tempfile.mkdtemp(prefix="belawril_batch_")
+        tmp = tempfile.mkdtemp(prefix="betalirilbids_batch_")
         try:
             chunk_files = []
+            total_batches = (len(timeline_segs) + batch_size - 1) // batch_size
             for batch_i in range(0, len(timeline_segs), batch_size):
+                curr_batch_idx = batch_i // batch_size
+                if progress_cb:
+                    pct = 10.0 + (curr_batch_idx / float(total_batches)) * 75.0
+                    progress_cb(pct, f"Encoding batch {curr_batch_idx + 1} of {total_batches}...")
+
                 batch = timeline_segs[batch_i:batch_i + batch_size]
                 v_parts = []
                 a_parts = []
@@ -95,7 +106,7 @@ def render_single_pass_concat(video_path, timeline_segs, output_path, fps, has_a
                 audio_out_spec = ":a=1" if has_audio else ":a=0"
                 filter_str = "".join(v_parts) + "".join(a_parts) + f"{concat_in}concat=n={len(batch)}:v=1{audio_out_spec}[outv]" + ("[outa]" if has_audio else "")
 
-                chunk_path = os.path.join(tmp, f"chunk_{batch_i // batch_size:04d}.mp4")
+                chunk_path = os.path.join(tmp, f"chunk_{curr_batch_idx:04d}.mp4")
                 cmd = [
                     "ffmpeg", "-y", "-v", "error", "-i", video_path,
                     "-filter_complex", filter_str,
@@ -111,11 +122,13 @@ def render_single_pass_concat(video_path, timeline_segs, output_path, fps, has_a
                 ref_engine.run(cmd)
                 chunk_files.append(chunk_path)
 
-            # Concatenate chunk files using concat demuxer
             list_path = os.path.join(tmp, "list.txt")
             with open(list_path, "w") as lf:
                 for c_path in chunk_files:
                     lf.write(f"file '{c_path}'\n")
+
+            if progress_cb:
+                progress_cb(90.0, "Concatenating batch files...")
 
             cmd = [
                 "ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", list_path,
@@ -130,7 +143,7 @@ def run_belawril_render(video_path, srt_path, output_path, mode="fast", preview=
                          crf=None, preset="faster", audio_bitrate="160k", progress_callback=None,
                          keep_temp=True):
     """
-    Renders Belawril timeline.
+    Renders Betalirilbids timeline.
 
     Parameters:
     - video_path: path to input video
@@ -145,6 +158,9 @@ def run_belawril_render(video_path, srt_path, output_path, mode="fast", preview=
     - keep_temp: if True, preserves intermediate files without deleting them
     """
     setup_ffmpeg_path()
+
+    if progress_callback:
+        progress_callback(5.0, "Parsing SRT and generating Betalirilbids timeline...")
 
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
@@ -209,29 +225,38 @@ def run_belawril_render(video_path, srt_path, output_path, mode="fast", preview=
             self.audio_bitrate = audio_bitrate
 
     args_obj = DummyArgs()
-    tmp = tempfile.mkdtemp(prefix="belawril_")
+    tmp = tempfile.mkdtemp(prefix="betalirilbids_")
     joined_tmp = os.path.join(tmp, "joined.mp4")
 
     try:
         fast_success = False
         if mode == "tiny":
             try:
+                if progress_callback:
+                    progress_callback(20.0, "Building tiny-file referencing video...")
                 ref_engine.tiny_render(args_obj, segs, fps, has_audio, total_frames_all, tmp, joined_tmp, crf)
                 fast_success = True
             except ref_engine.TinyError:
                 fast_success = False
         elif mode == "fast":
             try:
+                if progress_callback:
+                    progress_callback(20.0, "Building Annex-B H.264 stream-copy video...")
                 ref_engine.fast_render(args_obj, segs, fps, has_audio, total_frames_all, tmp, joined_tmp, crf)
                 fast_success = True
             except ref_engine.FastPathError:
                 fast_success = False
 
         if not fast_success:
-            # Single-pass filter complex render (fast, avoids thousands of subprocesses)
-            render_single_pass_concat(video_path, timeline_segs, joined_tmp, fps, has_audio, crf, preset, audio_bitrate)
+            render_single_pass_concat(video_path, timeline_segs, joined_tmp, fps, has_audio, crf, preset, audio_bitrate, progress_cb=progress_callback)
+
+        if progress_callback:
+            progress_callback(98.0, "Saving final output video...")
 
         shutil.move(joined_tmp, output_path)
+
+        if progress_callback:
+            progress_callback(100.0, "Video creation completed successfully!")
     finally:
         if not keep_temp:
             shutil.rmtree(tmp, ignore_errors=True)

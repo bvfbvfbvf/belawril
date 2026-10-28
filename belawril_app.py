@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Belawril - Fast Word-and-Letter Video Looper
+Betalirilbids - Fast Word-and-Letter Video Looper
 Desktop GUI application.
 """
 
@@ -75,10 +75,10 @@ def open_path(path):
         pass
 
 
-class BelawrilApp(tk.Tk):
+class BetalirilbidsApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Belawril — Fast Word-and-Letter Video Looper")
+        self.title("Betalirilbids — Fast Word-and-Letter Video Looper")
         self.minsize(780, 680)
 
         try:
@@ -130,7 +130,7 @@ class BelawrilApp(tk.Tk):
             ttk.Entry(f1, textvariable=var).grid(row=i, column=1, sticky="ew", padx=4, pady=4)
             ttk.Button(f1, text="Browse...", command=cmd).grid(row=i, column=2, padx=8, pady=4)
 
-        # Section 2: Belawril Looping Info & Settings
+        # Section 2: Betalirilbids Looping Info & Settings
         f2 = ttk.LabelFrame(root, text=" 2. Looping Rules & Rendering Options ")
         f2.grid(row=1, column=0, sticky="ew", **pad)
         f2.columnconfigure(1, weight=1)
@@ -143,9 +143,10 @@ class BelawrilApp(tk.Tk):
             row=1, column=0, columnspan=2, sticky="w", padx=8, pady=4)
 
         ttk.Label(f2, justify="left", foreground="#555555", text=(
-            "Belawril Loop Logic:\n"
+            "Betalirilbids Loop Logic:\n"
+            "• Each word's base clip plays first.\n"
             "• Every letter occurrence triggers a loop to its most recent previous occurrence.\n"
-            "• Whole-word loops replay previous word's letter loops + clip (without nested word loops).\n"
+            "• Letter loops replay continuously through the timeline [S_prev, S_curr].\n"
             "• Input and intermediate render files are strictly retained."
         )).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8))
 
@@ -158,8 +159,7 @@ class BelawrilApp(tk.Tk):
                                font=("Segoe UI", 10, "bold"))
         self.l_est.grid(row=0, column=0, sticky="w", padx=8, pady=6)
 
-        self.l_counts = ttk.Label(f3, text="Letter loops: 0 | Whole-word loops: 0",
-                                  foreground="#333333")
+        self.l_counts = ttk.Label(f3, text="Letter loops: 0", foreground="#333333")
         self.l_counts.grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
 
         # Section 4: Controls & Progress
@@ -167,7 +167,7 @@ class BelawrilApp(tk.Tk):
         f4.grid(row=3, column=0, sticky="ew", **pad)
         f4.columnconfigure(0, weight=1)
 
-        self.bar = ttk.Progressbar(f4, mode="indeterminate")
+        self.bar = ttk.Progressbar(f4, mode="determinate", maximum=100)
         self.bar.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
 
         self.l_status = ttk.Label(f4, text="Ready.")
@@ -176,7 +176,7 @@ class BelawrilApp(tk.Tk):
         btns = ttk.Frame(f4)
         btns.grid(row=2, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
 
-        self.b_start = ttk.Button(btns, text="Start Belawril Render", command=self.start)
+        self.b_start = ttk.Button(btns, text="Start Betalirilbids Render", command=self.start)
         self.b_start.pack(side="left")
 
         self.b_cancel = ttk.Button(btns, text="Cancel", command=self.cancel, state="disabled")
@@ -204,7 +204,7 @@ class BelawrilApp(tk.Tk):
             ("Video files", "*.mp4 *.mov *.mkv *.avi *.webm *.m4v"), ("All files", "*.*")])
         if p:
             self.v_video.set(p)
-            base = os.path.splitext(p)[0] + "_belawril.mp4"
+            base = os.path.splitext(p)[0] + "_betalirilbids.mp4"
             if self.out_is_auto or not self.v_out.get():
                 self.v_out.set(base)
                 self.out_is_auto = True
@@ -218,7 +218,7 @@ class BelawrilApp(tk.Tk):
     def browse_out(self):
         p = filedialog.asksaveasfilename(title="Save Output Video As", defaultextension=".mp4",
                                          filetypes=[("MP4 video", "*.mp4")],
-                                         initialfile=os.path.basename(self.v_out.get() or "belawril_output.mp4"))
+                                         initialfile=os.path.basename(self.v_out.get() or "betalirilbids_output.mp4"))
         if p:
             self.v_out.set(p)
             self.out_is_auto = False
@@ -237,7 +237,7 @@ class BelawrilApp(tk.Tk):
         video, srt = self.v_video.get(), self.v_srt.get()
         if not (os.path.isfile(video) and os.path.isfile(srt)):
             self.l_est.configure(text="Select a video and SRT file to calculate loop predictions.", foreground="")
-            self.l_counts.configure(text="Letter loops: 0 | Whole-word loops: 0")
+            self.l_counts.configure(text="Letter loops: 0")
             return
 
         try:
@@ -253,32 +253,31 @@ class BelawrilApp(tk.Tk):
 
             total_dur = res["total_duration"]
             l_count = res["letter_loop_count"]
-            w_count = res["word_loop_count"]
 
             self.l_est.configure(
                 text=f"Predicted output duration: {fmt_len(total_dur)} (Original video: {fmt_len(vid_dur)})",
                 foreground=""
             )
-            self.l_counts.configure(text=f"Letter loops: {l_count} | Whole-word loops: {w_count}")
+            self.l_counts.configure(text=f"Letter loops: {l_count}")
         except Exception as e:
             self.l_est.configure(text=f"Prediction error: {e}", foreground="#b00020")
 
     def start(self):
         video, srt, out = self.v_video.get(), self.v_srt.get(), self.v_out.get().strip()
         if not os.path.isfile(video):
-            return messagebox.showwarning("Belawril", "Please select a valid video file.")
+            return messagebox.showwarning("Betalirilbids", "Please select a valid video file.")
         if not os.path.isfile(srt):
-            return messagebox.showwarning("Belawril", "Please select a valid SRT subtitle file.")
+            return messagebox.showwarning("Betalirilbids", "Please select a valid SRT subtitle file.")
         if not out:
-            return messagebox.showwarning("Belawril", "Please specify where to save the output file.")
+            return messagebox.showwarning("Betalirilbids", "Please specify where to save the output file.")
 
         self.running = True
         self.b_start.configure(state="disabled")
         self.b_cancel.configure(state="normal")
         self.b_play.configure(state="disabled")
         self.b_folder.configure(state="disabled")
-        self.bar.start()
-        self.l_status.configure(text="Rendering Belawril video...")
+        self.bar["value"] = 0
+        self.l_status.configure(text="Starting Betalirilbids video render...")
 
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
@@ -286,6 +285,9 @@ class BelawrilApp(tk.Tk):
 
         mode_key = RENDERING_MODES.get(self.v_mode.get(), "fast")
         is_preview = self.v_preview.get()
+
+        def progress_cb(pct, status_text):
+            self.q.put(("progress", (pct, status_text)))
 
         def work():
             try:
@@ -296,7 +298,8 @@ class BelawrilApp(tk.Tk):
                     mode=mode_key,
                     preview=is_preview,
                     preview_max_sec=15.0,
-                    keep_temp=True  # Preserve original & intermediate files
+                    progress_callback=progress_cb,
+                    keep_temp=True
                 )
                 self.q.put(("done", None))
             except Exception as e:
@@ -313,6 +316,11 @@ class BelawrilApp(tk.Tk):
                 if kind == "done":
                     finished = data
                     break
+                elif kind == "progress":
+                    pct, msg = data
+                    self.bar["value"] = min(100.0, max(0.0, pct))
+                    self.l_status.configure(text=msg)
+                    self._log(msg)
         except queue.Empty:
             pass
 
@@ -323,20 +331,21 @@ class BelawrilApp(tk.Tk):
 
     def finish(self, err):
         self.running = False
-        self.bar.stop()
         self.b_start.configure(state="normal")
         self.b_cancel.configure(state="disabled")
         out = self.v_out.get()
 
         if err is None:
-            self.l_status.configure(text=f"Done! Output saved to: {out}")
+            self.bar["value"] = 100
+            self.l_status.configure(text=f"Done! Video finished creating and saved to: {out}")
             self.b_play.configure(state="normal")
             self.b_folder.configure(state="normal")
-            messagebox.showinfo("Belawril", f"Rendering completed successfully!\n\nSaved to:\n{out}")
+            messagebox.showinfo("Betalirilbids", f"Rendering completed successfully!\n\nSaved to:\n{out}")
         else:
+            self.bar["value"] = 0
             self.l_status.configure(text="Error occurred during rendering.")
             self._log(f"Error: {err}")
-            messagebox.showerror("Belawril", f"Render error:\n{err}")
+            messagebox.showerror("Betalirilbids", f"Render error:\n{err}")
 
     def cancel(self):
         if self.running:
@@ -351,14 +360,14 @@ class BelawrilApp(tk.Tk):
 
     def on_close(self):
         if self.running:
-            if not messagebox.askyesno("Belawril", "Rendering in progress. Stop render and exit?"):
+            if not messagebox.askyesno("Betalirilbids", "Rendering in progress. Stop render and exit?"):
                 return
             ref_engine.cancel()
         self.destroy()
 
 
 def main():
-    BelawrilApp().mainloop()
+    BetalirilbidsApp().mainloop()
 
 
 if __name__ == "__main__":
