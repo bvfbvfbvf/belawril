@@ -354,7 +354,7 @@ class TimelineSimulator:
             w_chars = get_word_letters(w)
 
             # 1. Outer Letter Loops trigger for current word BEFORE its base clip
-            for ch in w_chars:
+            for char_idx, ch in enumerate(w_chars):
                 prev_occurrences = [
                     hist_word for hist_word in letter_word_history.get(ch, [])
                     if hist_word["start"] < w_start
@@ -381,7 +381,38 @@ class TimelineSimulator:
                             "nesting_depth": 0
                         })
                         letter_loop_count += 1
+                        # Replay pass from S_prev to S_curr (target & intermediate words trigger Layer 2 loops)
                         process_timeline_range(replay_start_idx, entry_idx, s_prev, s_curr, nesting_depth=0)
+
+                        # At S_curr (reaching W_curr), letters up to and INCLUDING char_idx trigger Layer 2 inner letter loops
+                        for prev_ch in w_chars[:char_idx + 1]:
+                            p_occs = [
+                                hw for hw in letter_word_history.get(prev_ch, [])
+                                if hw["start"] < w_start
+                            ]
+                            if p_occs:
+                                mr_word = p_occs[-1]
+                                s_p2 = mr_word["start"]
+                                s_c2 = w_start
+                                dur2 = s_c2 - s_p2
+                                if dur2 > 0:
+                                    r_idx2 = mr_word.get("entry_idx", 0)
+                                    event_log.append({
+                                        "source_word": w["tok"],
+                                        "source_entry": entry_idx,
+                                        "event_type": "letter_loop",
+                                        "match": f"Letter '{prev_ch}' -> word '{mr_word['tok']}'",
+                                        "target_entry": r_idx2,
+                                        "target_word": mr_word["tok"],
+                                        "target_start": s_p2,
+                                        "target_end": s_c2,
+                                        "output_start": out_cursor,
+                                        "output_end": out_cursor + dur2,
+                                        "is_replay": True,
+                                        "nesting_depth": 1
+                                    })
+                                    letter_loop_count += 1
+                                    process_timeline_range(r_idx2, entry_idx, s_p2, s_c2, nesting_depth=1)
 
             # 2. Base Word Clip plays after letter loops
             word_dur = w_end - w_start

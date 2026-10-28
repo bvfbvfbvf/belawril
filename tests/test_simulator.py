@@ -41,12 +41,11 @@ FISH
     sim = simulator.TimelineSimulator(words, video_duration=4.0)
     res = sim.generate_timeline()
 
-    # BAT triggers 'B' (replaying CAB->DOG) and 'A' (replaying CAB->DOG)
-    assert res["letter_loop_count"] == 2
+    # BAT triggers 'B' and 'A' (each generating outer letter loop + inner loops at W_curr for letters up to and including trigger letter)
+    assert res["letter_loop_count"] == 5
     bat_loops = [e for e in res["event_log"] if e["source_word"] == "BAT" and e["event_type"] == "letter_loop"]
-    assert len(bat_loops) == 2
+    assert len(bat_loops) == 5
     assert bat_loops[0]["target_word"] == "CAB"
-    assert bat_loops[1]["target_word"] == "CAB"
 
 
 def test_3_layered_inner_loops():
@@ -68,8 +67,8 @@ AREA
     sim = simulator.TimelineSimulator(words, video_duration=3.0)
     res = sim.generate_timeline()
 
-    # Outer letter loops + 2nd-layer inner loops = 7 total letter loop events
-    assert res["letter_loop_count"] == 7
+    # Outer letter loops + 2nd-layer inner loops = 14 total letter loop events
+    assert res["letter_loop_count"] == 14
 
     # Check formatted log text output
     log_text = sim.format_event_log_text(res)
