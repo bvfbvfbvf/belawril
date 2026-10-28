@@ -1,6 +1,6 @@
 """
 Betalirilbids Timeline Simulator and Subtitle Parser.
-Handles SRT parsing, word splitting, 2-layer letter-loop calculations (with inner letter loops during replays),
+Handles SRT parsing, word splitting, 2-layer letter-loop calculations (with inner letter loops during replays, preserving all word gaps),
 and timeline duration/event counting with structured event logging.
 """
 
@@ -119,8 +119,9 @@ class TimelineSimulator:
       - For each letter occurrence in current word W_curr (start S_curr), search backwards through earlier original subtitle words (W_prev < W_curr)
         for the most recent word containing that letter (start S_prev).
       - Replays continuously through original video timeline from S_prev up to S_curr ([S_prev, S_curr]).
+      - NO SPACES SKIPPED: Replay ranges [S_prev, S_curr] include all natural gaps/spaces between words.
       - LAYERED LOOPS: During this replay pass (Layer 1, nesting_depth=1), replayed words trigger Layer 2 inner letter loops!
-      - Layer 2 inner letter loops (nesting_depth=2) play as base footage without spawning Layer 3 loops.
+      - Layer 2 inner letter loops (nesting_depth=2) play as continuous base footage [S_inner_prev, S_replayed] without spawning Layer 3 loops.
     - Word Base Clip:
       - Played after W_curr's letter loops, carrying playback forward from S_curr to E_curr.
     - Natural Gaps:
@@ -150,56 +151,118 @@ class TimelineSimulator:
         pos = 0.0
         letter_loop_count = 0
 
-        def process_timeline_range(start_idx, end_idx, target_end_time, nesting_depth=0):
+        def process_timeline_range(start_idx, end_idx, range_start_time, range_end_time, nesting_depth=0):
             """
-            Plays through words from start_idx up to end_idx (exclusive), stopping at target_end_time.
+            Plays through the continuous timeline range [range_start_time, range_end_time] without skipping gaps/spaces.
             If nesting_depth < max_nesting_depth, letters in replayed words trigger inner letter loops.
             """
             nonlocal out_cursor, letter_loop_count
+
+            if range_start_time >= range_end_time:
+                return
+
+            if nesting_depth >= self.max_nesting_depth:
+                # Base footage replay without inner loops: play continuous range [range_start_time, range_end_time]
+                dur = range_end_time - range_start_time
+                segments.append({
+                    "type": "word_base",
+                    "start": range_start_time,
+                    "end": range_end_time,
+                    "label": f"continuous_replay [{range_start_time:.2f}s - {range_end_time:.2f}s]",
+                    "is_replay": True,
+                    "nesting_depth": nesting_depth
+                })
+                event_log.append({
+                    "source_word": "replay_range",
+                    "source_entry": start_idx,
+                    "event_type": "continuous_replay",
+                    "match": None,
+                    "target_entry": start_idx,
+                    "target_word": "range",
+                    "target_start": range_start_time,
+                    "target_end": range_end_time,
+                    "output_start": out_cursor,
+                    "output_end": out_cursor + dur,
+                    "is_replay": True,
+                    "nesting_depth": nesting_depth
+                })
+                out_cursor += dur
+                return
+
+            # Replay pass with inner letter loop triggers (nesting_depth < max_nesting_depth)
             range_words = [
                 w_item for w_item in self.words
                 if start_idx <= w_item.get("entry_idx", 0) < end_idx
             ]
 
+            curr_pos = range_start_time
+
             for w in range_words:
                 w_start = w["start"]
-                w_end = min(w["end"], target_end_time)
-                if w_start >= target_end_time:
+                w_end = min(w["end"], range_end_time)
+                if w_start >= range_end_time:
                     break
+
+                # Preserve gap before replayed word
+                if w_start > curr_pos:
+                    gap_dur = w_start - curr_pos
+                    segments.append({
+                        "type": "gap",
+                        "start": curr_pos,
+                        "end": w_start,
+                        "label": "gap [replay]",
+                        "is_replay": True,
+                        "nesting_depth": nesting_depth
+                    })
+                    event_log.append({
+                        "source_word": "gap",
+                        "source_entry": 0,
+                        "event_type": "gap_replay",
+                        "match": None,
+                        "target_entry": 0,
+                        "target_word": None,
+                        "target_start": curr_pos,
+                        "target_end": w_start,
+                        "output_start": out_cursor,
+                        "output_end": out_cursor + gap_dur,
+                        "is_replay": True,
+                        "nesting_depth": nesting_depth
+                    })
+                    out_cursor += gap_dur
+                    curr_pos = w_start
 
                 entry_idx = w.get("entry_idx", 0)
                 w_chars = get_word_letters(w)
 
-                # Process inner letter loops if nesting depth allows
-                if nesting_depth < self.max_nesting_depth:
-                    for ch in w_chars:
-                        prev_occurrences = [
-                            hist_word for hist_word in letter_word_history.get(ch, [])
-                            if hist_word["start"] < w_start
-                        ]
-                        if prev_occurrences:
-                            most_recent_word = prev_occurrences[-1]
-                            s_prev = most_recent_word["start"]
-                            s_target = w_start
-                            dur = s_target - s_prev
-                            if dur > 0:
-                                replay_start_idx = most_recent_word.get("entry_idx", 0)
-                                event_log.append({
-                                    "source_word": w["tok"],
-                                    "source_entry": entry_idx,
-                                    "event_type": "letter_loop",
-                                    "match": f"Letter '{ch}' -> word '{most_recent_word['tok']}'",
-                                    "target_entry": replay_start_idx,
-                                    "target_word": most_recent_word["tok"],
-                                    "target_start": s_prev,
-                                    "target_end": s_target,
-                                    "output_start": out_cursor,
-                                    "output_end": out_cursor + dur,
-                                    "is_replay": True,
-                                    "nesting_depth": nesting_depth + 1
-                                })
-                                letter_loop_count += 1
-                                process_timeline_range(replay_start_idx, entry_idx, s_target, nesting_depth + 1)
+                # Process inner letter loops for replayed word
+                for ch in w_chars:
+                    prev_occurrences = [
+                        hist_word for hist_word in letter_word_history.get(ch, [])
+                        if hist_word["start"] < w_start
+                    ]
+                    if prev_occurrences:
+                        most_recent_word = prev_occurrences[-1]
+                        s_prev = most_recent_word["start"]
+                        s_target = w_start
+                        dur = s_target - s_prev
+                        if dur > 0:
+                            replay_start_idx = most_recent_word.get("entry_idx", 0)
+                            event_log.append({
+                                "source_word": w["tok"],
+                                "source_entry": entry_idx,
+                                "event_type": "letter_loop",
+                                "match": f"Letter '{ch}' -> word '{most_recent_word['tok']}'",
+                                "target_entry": replay_start_idx,
+                                "target_word": most_recent_word["tok"],
+                                "target_start": s_prev,
+                                "target_end": s_target,
+                                "output_start": out_cursor,
+                                "output_end": out_cursor + dur,
+                                "is_replay": True,
+                                "nesting_depth": nesting_depth + 1
+                            })
+                            letter_loop_count += 1
+                            process_timeline_range(replay_start_idx, entry_idx, s_prev, s_target, nesting_depth + 1)
 
                 # Play base word clip segment for this replayed word
                 dur = w_end - w_start
@@ -227,6 +290,34 @@ class TimelineSimulator:
                         "nesting_depth": nesting_depth
                     })
                     out_cursor += dur
+                    curr_pos = w_end
+
+            # Preserve remaining gap after last word up to range_end_time
+            if range_end_time > curr_pos:
+                gap_dur = range_end_time - curr_pos
+                segments.append({
+                    "type": "gap",
+                    "start": curr_pos,
+                    "end": range_end_time,
+                    "label": "gap [replay]",
+                    "is_replay": True,
+                    "nesting_depth": nesting_depth
+                })
+                event_log.append({
+                    "source_word": "gap",
+                    "source_entry": 0,
+                    "event_type": "gap_replay",
+                    "match": None,
+                    "target_entry": 0,
+                    "target_word": None,
+                    "target_start": curr_pos,
+                    "target_end": range_end_time,
+                    "output_start": out_cursor,
+                    "output_end": out_cursor + gap_dur,
+                    "is_replay": True,
+                    "nesting_depth": nesting_depth
+                })
+                out_cursor += gap_dur
 
         for w in self.words:
             w_start = w["start"]
@@ -290,7 +381,7 @@ class TimelineSimulator:
                             "nesting_depth": 0
                         })
                         letter_loop_count += 1
-                        process_timeline_range(replay_start_idx, entry_idx, s_curr, nesting_depth=0)
+                        process_timeline_range(replay_start_idx, entry_idx, s_prev, s_curr, nesting_depth=0)
 
             # 2. Base Word Clip plays after letter loops
             word_dur = w_end - w_start
